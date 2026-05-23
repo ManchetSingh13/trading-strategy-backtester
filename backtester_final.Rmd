@@ -1,0 +1,624 @@
+---
+title: "Trading Strategy Backtester"
+subtitle: "Golden Cross vs RSI Mean Reversion vs 12-Month Momentum"
+author: "Manchet Singh"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: flatly
+    highlight: tango
+    toc: true
+    toc_float: true
+    toc_depth: 2
+    code_folding: hide
+    df_print: paged
+
+
+params:
+  ticker:    "AAPL"
+  from:      "2015-01-01"
+  to:        "2024-12-31"
+  ma_fast:   50
+  ma_slow:   200
+  rsi_low:   30
+  rsi_high:  70
+  rsi_n:     14
+  mom_days:  252
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo       = TRUE,
+  warning    = FALSE,
+  message    = FALSE,
+  fig.width  = 10,
+  fig.height = 5
+)
+```
+
+---
+
+# Overview
+
+This report backtests three systematic trading strategies on
+**`r params$ticker`** from **`r params$from`** to **`r params$to`**
+using free data from Yahoo Finance.
+
+| Strategy | Type | Core idea |
+|---|---|---|
+| Golden Cross | Trend following | Buy when 50-day MA crosses above 200-day MA |
+| RSI Mean Reversion | Contrarian | Buy when RSI < `r params$rsi_low`, sell when RSI > `r params$rsi_high` |
+| 12-Month Momentum | Momentum | Stay long when 12-month return is positive |
+
+> All charts are interactive — hover, click legend items to toggle,
+> drag to zoom.
+
+---
+
+# Setup
+
+## Load packages
+
+```{r packages}
+# Run once in your console if not yet installed:
+# install.packages(c("quantmod","TTR","PerformanceAnalytics",
+#                    "tidyverse","plotly","kableExtra","DT","xts"))
+
+library(quantmod)
+library(TTR)
+library(PerformanceAnalytics)
+library(tidyverse)
+library(plotly)
+library(kableExtra)
+library(DT)
+library(xts)
+```
+
+---
+
+# Data
+
+```{r data}
+raw <- tryCatch({
+  getSymbols(
+    params$ticker,
+    src         = "yahoo",
+    from        = params$from,
+    to          = params$to,
+    auto.assign = FALSE,
+    warnings    = FALSE
+  )
+}, error = function(e) {
+  stop(paste("Could not download", params$ticker,
+             "— check the ticker and date range."))
+})
+
+prices <- Ad(raw)
+n_days <- nrow(prices)
+
+cat("Ticker:       ", params$ticker, "\n")
+cat("Trading days: ", n_days, "\n")
+cat("From:         ", as.character(min(index(prices))), "\n")
+cat("To:           ", as.character(max(index(prices))), "\n")
+cat("MA check:     ",
+    ifelse(n_days > params$ma_slow,
+           "PASS", "FAIL — extend 'from' date"), "\n")
+cat("Momentum check:",
+    ifelse(n_days > params$mom_days,
+           "PASS", "FAIL — extend 'from' date"), "\n")
+```
+
+## Price chart
+
+```{r price-chart, fig.height=3.5}
+plot_ly(
+  x    = index(prices),
+  y    = as.numeric(prices),
+  type = "scatter",
+  mode = "lines",
+  name = params$ticker,
+  line = list(color = "#2C2C2A", width = 1.2)
+) %>%
+  layout(
+    title     = paste(params$ticker, "— Adjusted close price"),
+    xaxis     = list(title = ""),
+    yaxis     = list(title = "Price ($)", tickprefix = "$"),
+    hovermode = "x unified"
+  ) %>%
+  config(displayModeBar = FALSE)
+```
+
+---
+
+# Strategy 1 — Golden Cross
+
+## How it works
+
+- **Buy** when the `r params$ma_fast`-day MA crosses **above** the
+  `r params$ma_slow`-day MA
+- **Sell** (go to cash) when it crosses back **below**
+- Signal lagged 1 day — no look-ahead bias
+
+This is a **trend-following** strategy. It keeps you in the market
+during sustained uptrends and pulls you out during prolonged downtrends.
+It gets whipsawed in choppy, sideways markets.
+
+```{r golden-cross}
+golden_cross <- function(prices, fast = 50, slow = 200) {
+  ma_fast   <- SMA(prices, n = fast)
+  ma_slow   <- SMA(prices, n = slow)
+  signal    <- ifelse(ma_fast > ma_slow, 1, 0)
+  signal    <- lag(signal, 1)
+  signal[is.na(signal)] <- 0
+  daily_ret <- dailyReturn(prices)
+  strat_ret <- daily_ret * signal
+  list(
+    signal    = signal,
+    daily_ret = daily_ret,
+    strat_ret = strat_ret,
+    ma_fast   = ma_fast,
+    ma_slow   = ma_slow
+  )
+}
+
+gc_result <- golden_cross(prices, params$ma_fast, params$ma_slow)
+cat("Days in market:",
+    sum(as.numeric(gc_result$signal) == 1, na.rm = TRUE),
+    "of", n_days, "\n")
+```
+
+## Price chart with moving averages
+
+```{r gc-chart, fig.height=4}
+plot_ly() %>%
+  add_lines(
+    x    = index(prices),
+    y    = as.numeric(prices),
+    name = "Price",
+    line = list(color = "#2C2C2A", width = 1)
+  ) %>%
+  add_lines(
+    x    = index(prices),
+    y    = as.numeric(gc_result$ma_fast),
+    name = paste0("MA", params$ma_fast, " fast"),
+    line = list(color = "#185FA5", width = 2)
+  ) %>%
+  add_lines(
+    x    = index(prices),
+    y    = as.numeric(gc_result$ma_slow),
+    name = paste0("MA", params$ma_slow, " slow"),
+    line = list(color = "#D85A30", width = 2)
+  ) %>%
+  layout(
+    title     = paste(params$ticker, "— Golden Cross moving averages"),
+    xaxis     = list(title = ""),
+    yaxis     = list(title = "Price ($)", tickprefix = "$"),
+    hovermode = "x unified",
+    legend    = list(orientation = "h", x = 0, y = -0.2)
+  ) %>%
+  config(displayModeBar = FALSE)
+```
+
+> When blue (fast MA) is above orange (slow MA) the strategy is long.
+> When orange is above blue the strategy is in cash.
+
+---
+
+# Strategy 2 — RSI Mean Reversion
+
+## How it works
+
+RSI measures how hard and fast a stock has moved, on a 0–100 scale:
+
+- **Buy** when RSI drops below `r params$rsi_low` — stock is oversold
+- **Sell** when RSI rises above `r params$rsi_high` — stock is overbought
+
+This is a **contrarian** strategy — the opposite of trend following.
+It bets that extreme moves snap back toward the average. Works best
+in choppy, range-bound markets. Struggles in strong trends.
+
+```{r rsi-strategy}
+rsi_strategy <- function(prices, rsi_low = 30, rsi_high = 70, n = 14) {
+  rsi_vals <- RSI(prices, n = n)
+  position <- rep(0, length(prices))
+  in_trade <- FALSE
+  for (i in (n + 1):length(prices)) {
+    if (!in_trade && !is.na(rsi_vals[i]) &&
+        rsi_vals[i] < rsi_low) {
+      in_trade <- TRUE
+    } else if (in_trade && !is.na(rsi_vals[i]) &&
+               rsi_vals[i] > rsi_high) {
+      in_trade <- FALSE
+    }
+    position[i] <- as.integer(in_trade)
+  }
+  signal    <- lag(xts(position, index(prices)), 1)
+  signal[is.na(signal)] <- 0
+  daily_ret <- dailyReturn(prices)
+  strat_ret <- daily_ret * signal
+  list(
+    signal    = signal,
+    daily_ret = daily_ret,
+    strat_ret = strat_ret,
+    rsi       = rsi_vals
+  )
+}
+
+rsi_result <- rsi_strategy(
+  prices,
+  params$rsi_low,
+  params$rsi_high,
+  params$rsi_n
+)
+cat("Days in market:",
+    sum(as.numeric(rsi_result$signal) == 1, na.rm = TRUE),
+    "of", n_days, "\n")
+```
+
+## RSI indicator chart
+
+```{r rsi-chart, fig.height=3.5}
+plot_ly() %>%
+  add_lines(
+    x    = index(prices),
+    y    = as.numeric(rsi_result$rsi),
+    name = paste0("RSI (", params$rsi_n, "-day)"),
+    line = list(color = "#534AB7", width = 1.5)
+  ) %>%
+  add_segments(
+    x    = min(index(prices)), xend = max(index(prices)),
+    y    = params$rsi_high,    yend = params$rsi_high,
+    name = paste("Overbought —", params$rsi_high),
+    line = list(color = "#D85A30", dash = "dash", width = 1.5)
+  ) %>%
+  add_segments(
+    x    = min(index(prices)), xend = max(index(prices)),
+    y    = params$rsi_low,     yend = params$rsi_low,
+    name = paste("Oversold —", params$rsi_low),
+    line = list(color = "#185FA5", dash = "dash", width = 1.5)
+  ) %>%
+  layout(
+    title     = paste(params$ticker, "— RSI indicator"),
+    xaxis     = list(title = ""),
+    yaxis     = list(title = "RSI", range = c(0, 100)),
+    hovermode = "x unified",
+    legend    = list(orientation = "h", x = 0, y = -0.2)
+  ) %>%
+  config(displayModeBar = FALSE)
+```
+
+---
+
+# Strategy 3 — 12-Month Momentum
+
+## How it works
+
+Momentum is one of the most researched anomalies in finance, first
+formally documented by Jegadeesh & Titman (1993). The core idea is
+simple: **stocks that have gone up over the past year tend to keep
+going up.**
+
+The rule used here:
+
+- Calculate the **12-month return** (252 trading days) for the stock
+  on every day
+- **Stay long** as long as the 12-month return is **positive** —
+  momentum is intact
+- **Go to cash** when the 12-month return turns **negative** —
+  momentum has broken down
+- Signal lagged 1 day — no look-ahead bias
+
+This is different from Golden Cross because it compares the stock to
+its own price from a year ago rather than comparing two moving
+averages. It is a slower, longer-term signal that generates far
+fewer trades.
+
+```{r momentum}
+momentum_strategy <- function(prices, n = 252) {
+
+  # 12-month return: today's price vs price n days ago
+  mom_ret <- ROC(prices, n = n, type = "discrete")
+
+  # Signal: 1 = in market (positive momentum), 0 = cash
+  signal  <- ifelse(mom_ret > 0, 1, 0)
+  signal  <- lag(signal, 1)
+  signal[is.na(signal)] <- 0
+
+  daily_ret <- dailyReturn(prices)
+  strat_ret <- daily_ret * signal
+
+  list(
+    signal    = signal,
+    daily_ret = daily_ret,
+    strat_ret = strat_ret,
+    mom_ret   = mom_ret
+  )
+}
+
+mom_result <- momentum_strategy(prices, params$mom_days)
+cat("Days in market:",
+    sum(as.numeric(mom_result$signal) == 1, na.rm = TRUE),
+    "of", n_days, "\n")
+```
+
+## 12-month rolling return chart
+
+```{r mom-chart, fig.height=4}
+mom_pct <- as.numeric(mom_result$mom_ret) * 100
+
+plot_ly() %>%
+  add_lines(
+    x    = index(prices),
+    y    = mom_pct,
+    name = "12-month return",
+    line = list(color = "#534AB7", width = 1.5),
+    fill = "tozeroy",
+    fillcolor = ifelse(mom_pct >= 0,
+                       "rgba(29,158,117,0.12)",
+                       "rgba(216,90,48,0.12)")
+  ) %>%
+  add_segments(
+    x    = min(index(prices)), xend = max(index(prices)),
+    y    = 0, yend = 0,
+    name = "Zero line (in/out signal)",
+    line = list(color = "#2C2C2A", dash = "dash", width = 1.5)
+  ) %>%
+  layout(
+    title     = paste(params$ticker,
+                      "— 12-month rolling return (momentum signal)"),
+    xaxis     = list(title = ""),
+    yaxis     = list(title = "12-month return (%)", ticksuffix = "%"),
+    hovermode = "x unified",
+    legend    = list(orientation = "h", x = 0, y = -0.2)
+  ) %>%
+  config(displayModeBar = FALSE)
+```
+
+> When the line is **above zero** the strategy is long — momentum is
+> positive. When it dips **below zero** the strategy goes to cash —
+> momentum has broken down. Notice how it stayed negative through
+> extended bear markets and positive through bull runs.
+
+---
+
+# Results
+
+## Equity curves
+
+```{r equity, fig.height=5}
+bh_ret <- dailyReturn(prices)
+dates  <- index(prices)
+
+gc_eq  <- cumprod(1 + gc_result$strat_ret)
+rsi_eq <- cumprod(1 + rsi_result$strat_ret)
+mom_eq <- cumprod(1 + mom_result$strat_ret)
+bh_eq  <- cumprod(1 + bh_ret)
+
+plot_ly() %>%
+  add_lines(
+    x    = dates,
+    y    = as.numeric(bh_eq),
+    name = "Buy & Hold",
+    line = list(color = "#888780", dash = "dash", width = 1.5)
+  ) %>%
+  add_lines(
+    x    = dates,
+    y    = as.numeric(gc_eq),
+    name = paste0("Golden Cross (MA",
+                  params$ma_fast, "/", params$ma_slow, ")"),
+    line = list(color = "#185FA5", width = 2.5)
+  ) %>%
+  add_lines(
+    x    = dates,
+    y    = as.numeric(rsi_eq),
+    name = paste0("RSI (", params$rsi_low,
+                  "/", params$rsi_high, ")"),
+    line = list(color = "#1D9E75", width = 2.5)
+  ) %>%
+  add_lines(
+    x    = dates,
+    y    = as.numeric(mom_eq),
+    name = paste0("Momentum (", params$mom_days, "-day)"),
+    line = list(color = "#854F0B", width = 2.5)
+  ) %>%
+  layout(
+    title     = paste(params$ticker,
+                      "— Equity curves ($1 invested at start)"),
+    xaxis     = list(title = ""),
+    yaxis     = list(title = "Portfolio value",
+                     tickprefix = "$", tickformat = ",.2f"),
+    hovermode = "x unified",
+    legend    = list(orientation = "h", x = 0, y = -0.2)
+  ) %>%
+  config(displayModeBar = FALSE)
+```
+
+## Drawdown
+
+```{r drawdown, fig.height=4}
+calc_dd <- function(ret) {
+  eq   <- cumprod(1 + as.numeric(ret))
+  peak <- cummax(eq)
+  (eq - peak) / peak * 100
+}
+
+plot_ly() %>%
+  add_lines(
+    x = dates, y = calc_dd(bh_ret),
+    name = "Buy & Hold",
+    line = list(color = "#888780", dash = "dash", width = 1),
+    fill = "tozeroy", fillcolor = "rgba(136,135,128,0.07)"
+  ) %>%
+  add_lines(
+    x = dates, y = calc_dd(gc_result$strat_ret),
+    name = "Golden Cross",
+    line = list(color = "#185FA5", width = 1.5),
+    fill = "tozeroy", fillcolor = "rgba(24,95,165,0.09)"
+  ) %>%
+  add_lines(
+    x = dates, y = calc_dd(rsi_result$strat_ret),
+    name = "RSI Strategy",
+    line = list(color = "#1D9E75", width = 1.5),
+    fill = "tozeroy", fillcolor = "rgba(29,158,117,0.09)"
+  ) %>%
+  add_lines(
+    x = dates, y = calc_dd(mom_result$strat_ret),
+    name = "Momentum",
+    line = list(color = "#854F0B", width = 1.5),
+    fill = "tozeroy", fillcolor = "rgba(133,79,11,0.09)"
+  ) %>%
+  layout(
+    title     = paste(params$ticker, "— Drawdown from peak"),
+    xaxis     = list(title = ""),
+    yaxis     = list(title = "Drawdown (%)", ticksuffix = "%"),
+    hovermode = "x unified",
+    legend    = list(orientation = "h", x = 0, y = -0.2)
+  ) %>%
+  config(displayModeBar = FALSE)
+```
+
+## Performance summary
+
+```{r metrics}
+calc_metrics <- function(ret, label) {
+  ret <- na.omit(as.numeric(ret))
+  if (length(ret) == 0 || sum(ret != 0) == 0) return(NULL)
+
+  equity   <- cumprod(1 + ret)
+  peak     <- cummax(equity)
+  drawdown <- (equity - peak) / peak
+
+  total_ret <- as.numeric(last(equity)) - 1
+  ann_vol   <- sd(ret) * sqrt(252)
+  ann_ret   <- tryCatch(
+    as.numeric(Return.annualized(
+      xts(ret, order.by = seq(
+        as.Date(params$from),
+        by         = "day",
+        length.out = length(ret)
+      )),
+      scale = 252
+    )),
+    error = function(e) mean(ret) * 252
+  )
+  sharpe   <- ifelse(ann_vol == 0, 0, round(ann_ret / ann_vol, 2))
+  max_dd   <- min(drawdown)
+  trading  <- sum(ret != 0)
+  win_rate <- ifelse(trading == 0, 0, sum(ret > 0) / trading)
+  pct_in   <- mean(ret != 0) * 100
+
+  data.frame(
+    Strategy        = label,
+    `Total Return`  = paste0(round(total_ret * 100, 1), "%"),
+    `Ann. Return`   = paste0(round(ann_ret   * 100, 1), "%"),
+    Volatility      = paste0(round(ann_vol   * 100, 1), "%"),
+    `Sharpe Ratio`  = sharpe,
+    `Max Drawdown`  = paste0(round(max_dd    * 100, 1), "%"),
+    `Win Rate`      = paste0(round(win_rate  * 100, 1), "%"),
+    `% Time Invested` = paste0(round(pct_in,   1), "%"),
+    check.names      = FALSE,
+    stringsAsFactors = FALSE
+  )
+}
+
+metrics <- bind_rows(
+  calc_metrics(as.numeric(gc_result$strat_ret),  "Golden Cross"),
+  calc_metrics(as.numeric(rsi_result$strat_ret), "RSI Strategy"),
+  calc_metrics(as.numeric(mom_result$strat_ret), "Momentum"),
+  calc_metrics(as.numeric(bh_ret),               "Buy & Hold")
+)
+
+metrics %>%
+  kable(align = c("l", rep("r", ncol(metrics) - 1))) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width        = TRUE,
+    font_size         = 14
+  ) %>%
+  row_spec(0, bold = TRUE, background = "#3c8dbc", color = "white") %>%
+  row_spec(3, background = "#fff8e8") %>%
+  column_spec(1, bold = TRUE) %>%
+  column_spec(5,
+    color = ifelse(
+      as.numeric(metrics$`Sharpe Ratio`) >= 1,  "#0F6E56",
+      ifelse(
+        as.numeric(metrics$`Sharpe Ratio`) >= 0, "#854F0B", "#993C1D"
+      )
+    ),
+    bold = TRUE
+  )
+```
+
+**Reading the table:**
+
+- **Sharpe Ratio** — green ≥ 1, amber 0–1, red < 0. Higher is better.
+- **Max Drawdown** — worst peak-to-trough loss you would have sat through.
+- **% Time Invested** — how much of the period each strategy was actually in the market.
+
+---
+
+# Key takeaways
+
+```{r takeaways, results='asis'}
+gc_total  <- as.numeric(last(cumprod(1 + gc_result$strat_ret)))  - 1
+rsi_total <- as.numeric(last(cumprod(1 + rsi_result$strat_ret))) - 1
+mom_total <- as.numeric(last(cumprod(1 + mom_result$strat_ret))) - 1
+bh_total  <- as.numeric(last(cumprod(1 + bh_ret)))               - 1
+
+best_val  <- max(gc_total, rsi_total, mom_total, bh_total)
+winner    <- dplyr::case_when(
+  gc_total  == best_val ~ "Golden Cross",
+  rsi_total == best_val ~ "RSI Strategy",
+  mom_total == best_val ~ "Momentum",
+  TRUE                  ~ "Buy & Hold"
+)
+
+gc_dd  <- round(min(calc_dd(gc_result$strat_ret)),  1)
+rsi_dd <- round(min(calc_dd(rsi_result$strat_ret)), 1)
+mom_dd <- round(min(calc_dd(mom_result$strat_ret)), 1)
+bh_dd  <- round(min(calc_dd(bh_ret)),               1)
+
+cat(paste0(
+  "- **", winner, "** produced the highest total return ",
+  "on **", params$ticker, "** over this period.\n\n",
+  "- **Golden Cross** returned **",
+  round(gc_total  * 100, 1), "%** with a max drawdown of **",
+  gc_dd, "%**.\n\n",
+  "- **RSI Strategy** returned **",
+  round(rsi_total * 100, 1), "%** with a max drawdown of **",
+  rsi_dd, "%**.\n\n",
+  "- **Momentum** returned **",
+  round(mom_total * 100, 1), "%** with a max drawdown of **",
+  mom_dd, "%**. ",
+  "It held the position only when the 12-month return was positive, ",
+  "sitting in cash otherwise.\n\n",
+  "- **Buy & Hold** returned **",
+  round(bh_total  * 100, 1), "%** with a max drawdown of **",
+  bh_dd, "%** — the passive benchmark.\n\n",
+  "> Momentum tends to perform best over long bull markets and ",
+  "protects capital during prolonged bear markets by going to cash. ",
+  "It underperforms during sharp, fast recoveries where it gets ",
+  "back in too slowly.\n\n",
+  "> Past performance does not guarantee future results. ",
+  "This backtest excludes commissions, slippage, and taxes."
+))
+```
+
+---
+
+# Methodology
+
+| Item | Detail |
+|---|---|
+| Data source | Yahoo Finance via `quantmod` — free, no API key |
+| Price series | Adjusted close — corrects for dividends and splits |
+| Date range | `r params$from` to `r params$to` |
+| Golden Cross signal | MA`r params$ma_fast` crosses MA`r params$ma_slow` |
+| RSI signal | RSI(`r params$rsi_n`) below `r params$rsi_low` = buy, above `r params$rsi_high` = sell |
+| Momentum signal | `r params$mom_days`-day return positive = long, negative = cash |
+| Signal lag | All signals lagged 1 trading day — no look-ahead bias |
+| Benchmark | Fully invested buy and hold for the entire period |
+
+---
+
+*Generated with R Markdown · `r params$ticker` · `r Sys.Date()`*
