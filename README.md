@@ -21,8 +21,8 @@ finance research alongside active options trading.
 - 100% free data — Yahoo Finance via quantmod, no API key needed
 
 ## Live report
-[Click here to view the interactive report]
-(https://manchetsingh13.github.io/trading-strategy-backtester/backtester_final.html)
+[[Click here to view the interactive report]]
+https://manchetsingh13.github.io/trading-strategy-backtester/backtester_final.html
 
 ## How to run locally
 1. Clone this repo
